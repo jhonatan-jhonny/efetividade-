@@ -117,6 +117,12 @@ with session_scope() as session:
         requested_year = int(params.get("ano", 2022))
     except (TypeError, ValueError):
         requested_year = 2022
+    requested_years = []
+    for raw_year in str(params.get("anos", requested_year)).split(","):
+        try:
+            requested_years.append(int(raw_year.strip()))
+        except ValueError:
+            continue
 
     state_rows = municipalities.states()
     state_names = state_name_map(tuple(state_rows))
@@ -146,18 +152,36 @@ with session_scope() as session:
     years = list(range(datetime.now().year, 2001, -1))
     if requested_year not in years:
         requested_year = 2022
-    year = st.sidebar.selectbox("ANO", years, index=years.index(requested_year))
-    analyze = st.sidebar.button("ANALISAR MUNICÍPIO", type="primary", width="stretch")
+    requested_years = sorted({value for value in requested_years if value in years}) or [requested_year]
+    selected_years_input = st.sidebar.multiselect(
+        "ANOS",
+        years,
+        default=requested_years,
+        max_selections=10,
+        help="Selecione até 10 anos. Cards e detalhes usam o ano mais recente; a Visão Geral compara todos.",
+    )
+    if not selected_years_input:
+        st.sidebar.warning("Selecione pelo menos um ano.")
+    selected_years = sorted(selected_years_input or [requested_year])
+    year = max(selected_years)
+    analyze = st.sidebar.button(
+        "ANALISAR MUNICÍPIO",
+        type="primary",
+        width="stretch",
+        disabled=not selected_years_input,
+    )
     st.sidebar.markdown("---")
     st.sidebar.caption("Ausência de registro nunca é convertida em zero.")
 
-    filters_changed = (
-        codigo_ibge != str(params.get("municipio", ""))
-        or uf != str(params.get("uf", ""))
-        or year != requested_year
-    )
     if analyze:
-        st.query_params.update({"uf": uf, "municipio": codigo_ibge, "ano": str(year)})
+        st.query_params.update(
+            {
+                "uf": uf,
+                "municipio": codigo_ibge,
+                "ano": str(year),
+                "anos": ",".join(str(value) for value in selected_years),
+            }
+        )
         st.session_state["analyzed"] = True
     is_analyzed = analyze or st.session_state.get("analyzed", False) or bool(params.get("municipio"))
 
@@ -165,9 +189,13 @@ with session_scope() as session:
     indicator_repo = IndicatorRepository(session)
     if is_analyzed:
         with st.spinner("Consultando cache e fontes oficiais necessárias…"):
-            sync_result = IBGEService(session).sync_core(codigo_ibge, year)
+            sync_errors = []
+            service = IBGEService(session)
+            for selected_year in selected_years:
+                result = service.sync_core(codigo_ibge, selected_year)
+                sync_errors.extend(result["errors"])
             session.flush()
-        for error in sync_result["errors"]:
+        for error in dict.fromkeys(sync_errors):
             st.warning(error)
 
     population = indicator_repo.get(codigo_ibge, "population", year)
@@ -176,13 +204,14 @@ with session_scope() as session:
 
     st.markdown('<div class="city-kicker">Análise municipal histórica</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="city-title">{city.name}</div>', unsafe_allow_html=True)
+    period_label = ", ".join(str(value) for value in selected_years)
     st.markdown(
-        f'<div class="city-subtitle">{city.state_name or uf} · Código IBGE {city.codigo_ibge} · Ano analisado: <b>{year}</b></div>',
+        f'<div class="city-subtitle">{city.state_name or uf} · Código IBGE {city.codigo_ibge} · Anos analisados: <b>{period_label}</b> · Referência dos cards: <b>{year}</b></div>',
         unsafe_allow_html=True,
     )
 
     if not is_analyzed:
-        st.info("Escolha estado, município e ano; depois clique em **Analisar município**.")
+        st.info("Escolha estado, município e um ou mais anos; depois clique em **Analisar município**.")
 
     header_cols = st.columns(6)
     with header_cols[0]:
@@ -234,6 +263,65 @@ with session_scope() as session:
             st.markdown(f"**Resumo numérico:** {summary}")
         st.caption("O resumo descreve valores e variações matemáticas; não atribui causalidade a representantes.")
 
+        if len(selected_years) > 1:
+            st.subheader("Comparação dos anos selecionados")
+            comparison_rows = []
+            for selected_year in selected_years:
+                selected_population = indicator_repo.get(codigo_ibge, "population", selected_year)
+                selected_gdp = indicator_repo.get(codigo_ibge, "gdp", selected_year)
+                selected_gdp_pc = indicator_repo.get(codigo_ibge, "gdp_per_capita_calculated", selected_year)
+                selected_crimes = indicator_repo.category(codigo_ibge, "security", selected_year)
+                selected_homicide = next(
+                    (
+                        item
+                        for item in selected_crimes
+                        if "HOMIC" in item.indicator_name.upper() and "TENT" not in item.indicator_name.upper()
+                    ),
+                    None,
+                )
+                comparison_rows.append(
+                    {
+                        "Ano": selected_year,
+                        "População": selected_population.value if selected_population else None,
+                        "PIB (R$)": selected_gdp.value if selected_gdp else None,
+                        "PIB por habitante (R$)": selected_gdp_pc.value if selected_gdp_pc else None,
+                        "Homicídios / 100 mil": per_100k(
+                            selected_homicide.value if selected_homicide else None,
+                            selected_population.value if selected_population else None,
+                        ),
+                    }
+                )
+            comparison_frame = pd.DataFrame(comparison_rows)
+            st.dataframe(
+                comparison_frame,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Ano": st.column_config.NumberColumn(format="%d"),
+                    "População": st.column_config.NumberColumn(format="localized"),
+                    "PIB (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
+                    "PIB por habitante (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+                    "Homicídios / 100 mil": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+            chart_columns = st.columns(2)
+            population_frame = comparison_frame.dropna(subset=["População"])
+            gdp_pc_frame = comparison_frame.dropna(subset=["PIB por habitante (R$)"])
+            with chart_columns[0]:
+                if not population_frame.empty:
+                    st.plotly_chart(
+                        line_chart(population_frame, x="Ano", y="População", title="População nos anos selecionados"),
+                        width="stretch",
+                        key="selected_years_population_chart",
+                    )
+            with chart_columns[1]:
+                if not gdp_pc_frame.empty:
+                    st.plotly_chart(
+                        line_chart(gdp_pc_frame, x="Ano", y="PIB por habitante (R$)", title="PIB por habitante nos anos selecionados"),
+                        width="stretch",
+                        key="selected_years_gdp_pc_chart",
+                    )
+
         st.subheader("Dados disponíveis para esta cidade")
         category_counts = dict(
             session.execute(
@@ -242,7 +330,14 @@ with session_scope() as session:
                 .group_by(Indicator.category)
             ).all()
         )
-        office_count = len(MandateRepository(session).for_year(year, codigo_ibge=codigo_ibge, uf=uf))
+        coverage_exercises = {
+            item.id
+            for selected_year in selected_years
+            for item in MandateRepository(session).for_year(
+                selected_year, codigo_ibge=codigo_ibge, uf=uf
+            )
+        }
+        office_count = len(coverage_exercises)
         coverage = pd.DataFrame(
             [
                 ("População", "complete" if population else "not_available"),
@@ -262,24 +357,33 @@ with session_scope() as session:
         st.subheader("Segurança pública")
         st.caption("Registros oficiais não são equivalentes à incidência real; cobertura e alimentação variam entre UFs e períodos.")
         if st.button("Sincronizar publicação municipal do Sinesp", key="sync_sinesp"):
-            try:
-                with st.spinner("Baixando/consultando a planilha oficial do MJSP…"):
-                    count = SinespService(session).sync_municipality(codigo_ibge, year)
-                    session.flush()
-                st.success(f"{count} indicadores oficiais carregados. Reabra esta aba após a atualização da tela.")
-            except ExternalServiceError as exc:
-                st.warning(str(exc))
-        crimes = indicator_repo.category(codigo_ibge, "security", year)
-        if not crimes:
-            st.info("Sem dado municipal carregado para este período. Isso não significa zero ocorrências.")
+            total = 0
+            with st.spinner("Baixando/consultando as planilhas oficiais do MJSP…"):
+                for selected_year in selected_years:
+                    try:
+                        total += SinespService(session).sync_municipality(codigo_ibge, selected_year)
+                    except ExternalServiceError as exc:
+                        st.warning(f"{selected_year}: {exc}")
+                session.flush()
+            if total:
+                st.success(f"{total} indicadores oficiais carregados para os anos selecionados.")
+        selected_crime_records = [
+            item
+            for selected_year in selected_years
+            for item in indicator_repo.category(codigo_ibge, "security", selected_year)
+        ]
+        if not selected_crime_records:
+            st.info("Sem dado municipal carregado para os anos selecionados. Isso não significa zero ocorrências.")
         else:
             rows = []
-            for item in crimes:
+            for item in selected_crime_records:
+                item_population = indicator_repo.get(codigo_ibge, "population", item.year)
                 rows.append(
                     {
+                        "Ano": item.year,
                         "Indicador": item.indicator_name,
                         "Total": item.value,
-                        "Taxa / 100 mil": per_100k(item.value, population.value if population else None),
+                        "Taxa / 100 mil": per_100k(item.value, item_population.value if item_population else None),
                         "Qualidade": quality_label(item.quality_status),
                         "Fonte": item.source.name,
                         "Referência": item.year,
@@ -287,8 +391,19 @@ with session_scope() as session:
                 )
             crime_frame = pd.DataFrame(rows)
             st.dataframe(crime_frame, hide_index=True, width="stretch")
-            chosen = st.selectbox("Indicador", [i.indicator_code for i in crimes], format_func=lambda c: next(i.indicator_name for i in crimes if i.indicator_code == c))
-            series = indicator_repo.series(codigo_ibge, chosen)
+            available_crime_codes = list(dict.fromkeys(item.indicator_code for item in selected_crime_records))
+            chosen = st.selectbox(
+                "Indicador",
+                available_crime_codes,
+                format_func=lambda code: next(
+                    item.indicator_name for item in selected_crime_records if item.indicator_code == code
+                ),
+            )
+            series = [
+                item
+                for item in indicator_repo.series(codigo_ibge, chosen)
+                if item.year in selected_years
+            ]
             chart_rows = []
             for item in series:
                 pop = indicator_repo.get(codigo_ibge, "population", item.year)
@@ -299,7 +414,13 @@ with session_scope() as session:
                 width="stretch",
                 key="security_rate_chart",
             )
-            source_badge(crimes[0].source.name, crimes[0].source.url, str(year), crimes[0].quality_status)
+            first_crime = selected_crime_records[0]
+            source_badge(
+                first_crime.source.name,
+                first_crime.source.url,
+                period_label,
+                first_crime.quality_status,
+            )
 
     with tabs[2]:
         st.subheader("Economia")
@@ -314,11 +435,15 @@ with session_scope() as session:
                     width="stretch",
                     key="economy_sectors_chart",
                 )
-            series = indicator_repo.series(codigo_ibge, "gdp")
+            series = [
+                item
+                for item in indicator_repo.series(codigo_ibge, "gdp")
+                if item.year in selected_years
+            ]
             if series:
                 frame = pd.DataFrame({"Ano": [i.year for i in series], "PIB (R$)": [i.value for i in series], "Fonte": [i.source.name for i in series]})
                 st.plotly_chart(
-                    line_chart(frame, x="Ano", y="PIB (R$)", title="PIB municipal — anos já sincronizados", hover_data=["Fonte"]),
+                    line_chart(frame, x="Ano", y="PIB (R$)", title="PIB municipal — anos selecionados", hover_data=["Fonte"]),
                     width="stretch",
                     key="economy_gdp_history_chart",
                 )
@@ -358,22 +483,29 @@ with session_scope() as session:
             if st.button("Carregar deputados federais da UF", width="stretch"):
                 try:
                     with st.spinner("Reconstruindo eventos oficiais de exercício da Câmara…"):
-                        n = CamaraService(session).sync_deputies(uf, year)
+                        service = CamaraService(session)
+                        n = sum(service.sync_deputies(uf, selected_year) for selected_year in selected_years)
                         session.flush()
-                    st.success(f"{n} intervalos de exercício carregados.")
+                    st.success(f"{n} intervalos processados para os anos selecionados.")
                 except ExternalServiceError as exc:
                     st.warning(str(exc))
         with col_sync_2:
             if st.button("Carregar senadores da UF", width="stretch"):
                 try:
                     with st.spinner("Consultando mandatos e exercícios no Senado…"):
-                        n = SenadoService(session).sync_senators(uf, year)
+                        service = SenadoService(session)
+                        n = sum(service.sync_senators(uf, selected_year) for selected_year in selected_years)
                         session.flush()
-                    st.success(f"{n} intervalos de exercício carregados.")
+                    st.success(f"{n} intervalos processados para os anos selecionados.")
                 except ExternalServiceError as exc:
                     st.warning(str(exc))
 
-        exercises = MandateRepository(session).for_year(year, codigo_ibge=codigo_ibge, uf=uf)
+        mandate_repository = MandateRepository(session)
+        exercises_by_id = {}
+        for selected_year in selected_years:
+            for exercise in mandate_repository.for_year(selected_year, codigo_ibge=codigo_ibge, uf=uf):
+                exercises_by_id[exercise.id] = exercise
+        exercises = list(exercises_by_id.values())
         groups = {
             "Municipal": ["Prefeito", "Vice-prefeito", "Vereador"],
             "Estadual": ["Governador", "Vice-governador", "Deputado estadual"],
@@ -393,8 +525,10 @@ with session_scope() as session:
                             politician_card(exercise)
 
         st.subheader("Linha do tempo política")
-        timeline_items = MandateRepository(session).timeline(codigo_ibge, uf, max(2002, year - 8), min(datetime.now().year, year + 4))
-        fig = political_timeline(timeline_items, max(2002, year - 8), min(datetime.now().year, year + 4))
+        timeline_start = min(selected_years) if len(selected_years) > 1 else max(2002, year - 8)
+        timeline_end = max(selected_years) if len(selected_years) > 1 else min(datetime.now().year, year + 4)
+        timeline_items = mandate_repository.timeline(codigo_ibge, uf, timeline_start, timeline_end)
+        fig = political_timeline(timeline_items, timeline_start, timeline_end)
         if fig:
             st.plotly_chart(fig, width="stretch", key="politics_timeline_chart")
         else:
@@ -445,6 +579,7 @@ with session_scope() as session:
 
     with tabs[10]:
         st.subheader("Comparar municípios")
+        st.caption(f"A comparação entre municípios abaixo usa o ano de referência dos cards: {year}.")
         options = [m.codigo_ibge for m in city_rows if m.codigo_ibge != codigo_ibge]
         compare_codes = st.multiselect(
             "Outros municípios da mesma UF (até 4)",
@@ -477,7 +612,17 @@ with session_scope() as session:
             st.caption("Tabela ordenada exclusivamente pelo valor do indicador selecionado; não é ranking político.")
 
         st.subheader("Comparação histórica e mandatos")
-        start_year, end_year = st.slider("Intervalo", 2002, datetime.now().year, (max(2002, year - 8), year))
+        default_interval = (
+            (min(selected_years), max(selected_years))
+            if len(selected_years) > 1
+            else (max(2002, year - 8), year)
+        )
+        start_year, end_year = st.slider(
+            "Intervalo",
+            2002,
+            datetime.now().year,
+            default_interval,
+        )
         history = indicator_repo.series(codigo_ibge, metric, start_year, end_year)
         if history:
             frame = pd.DataFrame({"Ano": [i.year for i in history], "Valor": [i.value for i in history], "Qualidade": [quality_label(i.quality_status) for i in history]})

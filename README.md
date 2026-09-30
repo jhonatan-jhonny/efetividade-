@@ -21,6 +21,7 @@ atribuídos causalmente a representantes; e séries incompatíveis não recebem 
 - banco SQLite local ou PostgreSQL via `DATABASE_URL`;
 - cache persistente, retry/backoff HTTP, tratamento de JSON/XML, logs e estados de qualidade;
 - dashboard com 12 abas, comparações, timeline política, perfil e painel de cobertura;
+- seleção simultânea de até 10 anos, comparação tabular/visual e URL compartilhável do período;
 - CLI de sincronização e configuração para Render.
 
 Conectores de INEP, DATASUS, Novo CAGED/RAIS e Siconfi estão descritos e delimitados na interface, mas
