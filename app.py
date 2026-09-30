@@ -28,6 +28,7 @@ from services.senado import SenadoService
 from services.sinesp import SinespService
 from services.tse import TSEService
 from utils.formatting import calculate_change, format_currency, format_number, format_rate, per_100k
+from utils.politics import canonical_office, ordered_offices
 from utils.requests import ExternalServiceError
 
 st.set_page_config(
@@ -238,7 +239,7 @@ with session_scope() as session:
 
     tab_names = [
         "Visão Geral", "Segurança", "Economia", "Emprego", "Educação", "Saúde",
-        "Desenvolvimento", "Finanças Públicas", "Política", "Eleições", "Comparar", "Fontes e Metodologia",
+        "Desenvolvimento", "Finanças Públicas", "Política e Eleições", "Comparar", "Fontes e Metodologia",
     ]
     tabs = st.tabs(tab_names)
 
@@ -476,11 +477,25 @@ with session_scope() as session:
         render_empty_connector("Tesouro / Siconfi / Finbra", "siconfi")
 
     with tabs[8]:
-        st.subheader("Representantes no período")
-        st.caption("Câmara e Senado são consultados por exercício parlamentar. Resultado eleitoral isolado nunca prova exercício do cargo.")
-        col_sync_1, col_sync_2 = st.columns(2)
+        st.subheader("Política e eleições")
+        st.caption(
+            "Tudo nesta área é organizado por cargo. Exercício confirmado e resultado eleitoral "
+            "continuam separados para não apresentar candidatura como mandato."
+        )
+
+        election_years = [value for value in years if value % 4 == 0 and value <= 2024]
+        past_elections = [value for value in election_years if value <= year]
+        default_election = max(past_elections) if past_elections else election_years[-1]
+        election_year = st.selectbox(
+            "Eleição municipal de referência",
+            election_years,
+            index=election_years.index(default_election),
+            key="politics_election_year",
+        )
+
+        col_sync_1, col_sync_2, col_sync_3 = st.columns(3)
         with col_sync_1:
-            if st.button("Carregar deputados federais da UF", width="stretch"):
+            if st.button("Carregar deputados federais", width="stretch", key="sync_federal_deputies"):
                 try:
                     with st.spinner("Reconstruindo eventos oficiais de exercício da Câmara…"):
                         service = CamaraService(session)
@@ -490,7 +505,7 @@ with session_scope() as session:
                 except ExternalServiceError as exc:
                     st.warning(str(exc))
         with col_sync_2:
-            if st.button("Carregar senadores da UF", width="stretch"):
+            if st.button("Carregar senadores", width="stretch", key="sync_senators"):
                 try:
                     with st.spinner("Consultando mandatos e exercícios no Senado…"):
                         service = SenadoService(session)
@@ -499,6 +514,15 @@ with session_scope() as session:
                     st.success(f"{n} intervalos processados para os anos selecionados.")
                 except ExternalServiceError as exc:
                     st.warning(str(exc))
+        with col_sync_3:
+            if st.button("Importar eleição municipal", width="stretch", key="sync_tse"):
+                try:
+                    with st.spinner("Baixando e filtrando arquivos oficiais do TSE…"):
+                        n = TSEService(session).sync_election(codigo_ibge, uf, election_year)
+                        session.flush()
+                    st.success(f"{n} candidaturas carregadas e separadas por cargo.")
+                except (ExternalServiceError, OSError, ValueError) as exc:
+                    st.warning(str(exc))
 
         mandate_repository = MandateRepository(session)
         exercises_by_id = {}
@@ -506,23 +530,69 @@ with session_scope() as session:
             for exercise in mandate_repository.for_year(selected_year, codigo_ibge=codigo_ibge, uf=uf):
                 exercises_by_id[exercise.id] = exercise
         exercises = list(exercises_by_id.values())
-        groups = {
-            "Municipal": ["Prefeito", "Vice-prefeito", "Vereador"],
-            "Estadual": ["Governador", "Vice-governador", "Deputado estadual"],
-            "Federal": ["Presidente", "Vice-presidente", "Deputado federal", "Senador"],
-        }
-        for group, offices in groups.items():
-            matched = [e for e in exercises if e.office in offices]
-            with st.expander(f"{group} · {len(matched)} ocupante(s)/intervalo(s)", expanded=group == "Federal"):
-                if not matched:
-                    st.info("Sem exercício confirmado e carregado para este recorte.")
-                    if group == "Municipal":
-                        st.caption("Mandatos municipais exigem confirmação por prefeitura/câmara/Diário Oficial; não são inferidos apenas do TSE.")
-                else:
+
+        candidate_rows = session.execute(
+            select(Candidacy, Politician, ElectionResult)
+            .join(Politician, Candidacy.politician_id == Politician.id)
+            .outerjoin(ElectionResult, ElectionResult.candidacy_id == Candidacy.id)
+            .where(Candidacy.codigo_ibge == codigo_ibge, Candidacy.election_year == election_year)
+            .order_by(Candidacy.office, ElectionResult.votes.desc())
+        ).all()
+
+        offices = ordered_offices(
+            [exercise.office for exercise in exercises]
+            + [candidacy.office for candidacy, _, _ in candidate_rows]
+        )
+        for office in offices:
+            office_exercises = [
+                exercise for exercise in exercises if canonical_office(exercise.office) == office
+            ]
+            office_candidates = [
+                row for row in candidate_rows if canonical_office(row[0].office) == office
+            ]
+            candidacy_count = len({candidacy.id for candidacy, _, _ in office_candidates})
+            title = (
+                f"{office} · {len(office_exercises)} exercício(s) confirmado(s) · "
+                f"{candidacy_count} candidatura(s) em {election_year}"
+            )
+            with st.expander(
+                title,
+                expanded=office == "Prefeito" and bool(office_exercises or office_candidates),
+            ):
+                st.markdown("**Exercício confirmado nos anos analisados**")
+                if office_exercises:
                     columns = st.columns(3)
-                    for idx, exercise in enumerate(matched):
-                        with columns[idx % 3]:
+                    for index, exercise in enumerate(office_exercises):
+                        with columns[index % 3]:
                             politician_card(exercise)
+                else:
+                    st.caption("Nenhum intervalo de exercício confirmado foi carregado para este cargo.")
+
+                st.markdown(f"**Candidaturas e resultados — eleição {election_year}**")
+                if office_candidates:
+                    frame = pd.DataFrame(
+                        [
+                            {
+                                "Candidato": politician.name,
+                                "Partido": candidacy.party,
+                                "Número": candidacy.candidate_number,
+                                "Turno": result.round if result else None,
+                                "Votos": result.votes if result else None,
+                                "%": result.vote_percentage if result else None,
+                                "Situação": result.status if result else candidacy.totalization_status,
+                            }
+                            for candidacy, politician, result in office_candidates
+                        ]
+                    )
+                    st.dataframe(frame, hide_index=True, width="stretch")
+                else:
+                    st.caption("Nenhuma candidatura importada para este cargo e eleição.")
+
+        if candidate_rows:
+            source = session.scalar(select(Source).where(Source.key == "tse"))
+            source_badge(source.name, source.url, str(election_year), "complete")
+        else:
+            st.info("Nenhuma eleição foi importada para este município/ano.")
 
         st.subheader("Linha do tempo política")
         timeline_start = min(selected_years) if len(selected_years) > 1 else max(2002, year - 8)
@@ -533,51 +603,12 @@ with session_scope() as session:
             st.plotly_chart(fig, width="stretch", key="politics_timeline_chart")
         else:
             st.info("Carregue representantes para construir a linha do tempo.")
-        st.warning("Os dados mostram associações temporais. A presença de determinado representante durante um período não implica que alterações nos indicadores tenham sido causadas por esse representante.")
+        st.warning(
+            "Os dados mostram associações temporais. A presença de determinado representante durante "
+            "um período não implica que alterações nos indicadores tenham sido causadas por ele."
+        )
 
     with tabs[9]:
-        st.subheader("Resultados eleitorais oficiais")
-        # A carga municipal usa somente eleições municipais já concluídas.
-        election_years = [y for y in years if y % 4 == 0 and y <= 2024]
-        election_year = st.selectbox("Eleição", election_years, index=election_years.index(2020) if 2020 in election_years else 0)
-        if st.button("Importar eleição municipal do TSE", key="sync_tse"):
-            try:
-                with st.spinner("Baixando e filtrando arquivos oficiais em chunks…"):
-                    n = TSEService(session).sync_election(codigo_ibge, uf, election_year)
-                    session.flush()
-                st.success(f"{n} candidaturas carregadas. Candidatura permanece separada de exercício de cargo.")
-            except (ExternalServiceError, OSError, ValueError) as exc:
-                st.warning(str(exc))
-        rows = session.execute(
-            select(Candidacy, Politician, ElectionResult)
-            .join(Politician, Candidacy.politician_id == Politician.id)
-            .outerjoin(ElectionResult, ElectionResult.candidacy_id == Candidacy.id)
-            .where(Candidacy.codigo_ibge == codigo_ibge, Candidacy.election_year == election_year)
-            .order_by(Candidacy.office, ElectionResult.votes.desc())
-        ).all()
-        if rows:
-            frame = pd.DataFrame(
-                [
-                    {
-                        "Cargo": c.office,
-                        "Candidato": p.name,
-                        "Partido": c.party,
-                        "Número": c.candidate_number,
-                        "Turno": r.round if r else None,
-                        "Votos": r.votes if r else None,
-                        "%": r.vote_percentage if r else None,
-                        "Situação": (r.status if r else c.totalization_status),
-                    }
-                    for c, p, r in rows
-                ]
-            )
-            st.dataframe(frame, hide_index=True, width="stretch")
-            source = session.scalar(select(Source).where(Source.key == "tse"))
-            source_badge(source.name, source.url, str(election_year), "complete")
-        else:
-            st.info("Nenhuma eleição foi importada para este município/ano.")
-
-    with tabs[10]:
         st.subheader("Comparar municípios")
         st.caption(f"A comparação entre municípios abaixo usa o ano de referência dos cards: {year}.")
         options = [m.codigo_ibge for m in city_rows if m.codigo_ibge != codigo_ibge]
@@ -636,7 +667,7 @@ with session_scope() as session:
         if timeline_fig:
             st.plotly_chart(timeline_fig, width="stretch", key="comparison_timeline_chart")
 
-    with tabs[11]:
+    with tabs[10]:
         st.subheader("Fontes, atualização e metodologia")
         st.markdown(
             """

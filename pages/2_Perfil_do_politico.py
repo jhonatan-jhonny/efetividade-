@@ -20,7 +20,7 @@ query_id = st.query_params.get("politico")
 with session_scope() as session:
     people = list(session.scalars(select(Politician).order_by(Politician.name)))
     if not people:
-        st.info("Nenhum político foi sincronizado ainda. Use as abas Política ou Eleições na página principal.")
+        st.info("Nenhum político foi sincronizado ainda. Use a aba Política e Eleições na página principal.")
         st.stop()
     ids = [p.id for p in people]
     default = ids.index(int(query_id)) if query_id and str(query_id).isdigit() and int(query_id) in ids else 0
