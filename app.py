@@ -294,7 +294,11 @@ with session_scope() as session:
                 pop = indicator_repo.get(codigo_ibge, "population", item.year)
                 chart_rows.append({"Ano": item.year, "Ocorrências": item.value, "Taxa": per_100k(item.value, pop.value if pop else None), "População usada": pop.value if pop else None, "Fonte": item.source.name})
             frame = pd.DataFrame(chart_rows)
-            st.plotly_chart(line_chart(frame, x="Ano", y="Taxa", title="Taxa registrada por 100 mil", hover_data=["Ocorrências", "População usada", "Fonte"]), width="stretch")
+            st.plotly_chart(
+                line_chart(frame, x="Ano", y="Taxa", title="Taxa registrada por 100 mil", hover_data=["Ocorrências", "População usada", "Fonte"]),
+                width="stretch",
+                key="security_rate_chart",
+            )
             source_badge(crimes[0].source.name, crimes[0].source.url, str(year), crimes[0].quality_status)
 
     with tabs[2]:
@@ -305,11 +309,19 @@ with session_scope() as session:
             sectors = [i for i in econ if i.indicator_code in sector_codes]
             if sectors:
                 frame = pd.DataFrame({"Setor": [i.indicator_name.replace("Valor adicionado bruto a preços correntes da ", "").replace("Valor adicionado bruto a preços correntes dos ", "") for i in sectors], "R$": [i.value for i in sectors]})
-                st.plotly_chart(bar_chart(frame, x="Setor", y="R$", title=f"Valor adicionado por atividade — {year}"), width="stretch")
+                st.plotly_chart(
+                    bar_chart(frame, x="Setor", y="R$", title=f"Valor adicionado por atividade — {year}"),
+                    width="stretch",
+                    key="economy_sectors_chart",
+                )
             series = indicator_repo.series(codigo_ibge, "gdp")
             if series:
                 frame = pd.DataFrame({"Ano": [i.year for i in series], "PIB (R$)": [i.value for i in series], "Fonte": [i.source.name for i in series]})
-                st.plotly_chart(line_chart(frame, x="Ano", y="PIB (R$)", title="PIB municipal — anos já sincronizados", hover_data=["Fonte"]), width="stretch")
+                st.plotly_chart(
+                    line_chart(frame, x="Ano", y="PIB (R$)", title="PIB municipal — anos já sincronizados", hover_data=["Fonte"]),
+                    width="stretch",
+                    key="economy_gdp_history_chart",
+                )
             if gdp:
                 source_badge(gdp.source.name, gdp.source.url, str(gdp.year), gdp.quality_status)
         else:
@@ -384,7 +396,7 @@ with session_scope() as session:
         timeline_items = MandateRepository(session).timeline(codigo_ibge, uf, max(2002, year - 8), min(datetime.now().year, year + 4))
         fig = political_timeline(timeline_items, max(2002, year - 8), min(datetime.now().year, year + 4))
         if fig:
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, width="stretch", key="politics_timeline_chart")
         else:
             st.info("Carregue representantes para construir a linha do tempo.")
         st.warning("Os dados mostram associações temporais. A presença de determinado representante durante um período não implica que alterações nos indicadores tenham sido causadas por esse representante.")
@@ -456,7 +468,11 @@ with session_scope() as session:
             frame = pd.DataFrame(compare_rows)
             available = frame.dropna(subset=["Valor"])
             if not available.empty:
-                st.plotly_chart(bar_chart(available, x="Município", y="Valor", title=f"{dict(population='População', gdp='PIB', gdp_per_capita_calculated='PIB por habitante calculado')[metric]} — {year}"), width="stretch")
+                st.plotly_chart(
+                    bar_chart(available, x="Município", y="Valor", title=f"{dict(population='População', gdp='PIB', gdp_per_capita_calculated='PIB por habitante calculado')[metric]} — {year}"),
+                    width="stretch",
+                    key="municipality_comparison_chart",
+                )
             st.dataframe(frame.sort_values("Valor", ascending=False, na_position="last"), hide_index=True, width="stretch")
             st.caption("Tabela ordenada exclusivamente pelo valor do indicador selecionado; não é ranking político.")
 
@@ -465,11 +481,15 @@ with session_scope() as session:
         history = indicator_repo.series(codigo_ibge, metric, start_year, end_year)
         if history:
             frame = pd.DataFrame({"Ano": [i.year for i in history], "Valor": [i.value for i in history], "Qualidade": [quality_label(i.quality_status) for i in history]})
-            st.plotly_chart(line_chart(frame, x="Ano", y="Valor", title="Indicador — anos sincronizados", hover_data=["Qualidade"]), width="stretch")
+            st.plotly_chart(
+                line_chart(frame, x="Ano", y="Valor", title="Indicador — anos sincronizados", hover_data=["Qualidade"]),
+                width="stretch",
+                key="historical_indicator_chart",
+            )
         timeline_items = MandateRepository(session).timeline(codigo_ibge, uf, start_year, end_year)
         timeline_fig = political_timeline(timeline_items, start_year, end_year)
         if timeline_fig:
-            st.plotly_chart(timeline_fig, width="stretch")
+            st.plotly_chart(timeline_fig, width="stretch", key="comparison_timeline_chart")
 
     with tabs[11]:
         st.subheader("Fontes, atualização e metodologia")
