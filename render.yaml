@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: raiox-municipal
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.address 0.0.0.0 --server.port $PORT
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: DATABASE_URL
+        fromDatabase:
+          name: raiox-municipal-db
+          property: connectionString
+      - key: USE_MOCK_DATA
+        value: "false"
+databases:
+  - name: raiox-municipal-db
+    plan: starter
