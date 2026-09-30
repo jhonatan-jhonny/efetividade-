@@ -41,6 +41,7 @@ def main(argv=None) -> int:
     try:
         with session_scope() as session:
             seed_sources(session)
+            session.commit()
             ibge = IBGEService(session)
             if args.dataset in {"municipalities", "all"}:
                 print(f"Municípios sincronizados: {ibge.sync_municipalities(force=args.force)}")

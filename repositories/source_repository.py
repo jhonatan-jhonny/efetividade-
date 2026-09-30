@@ -10,54 +10,56 @@ from database.models import Source
 
 
 def seed_sources(session) -> dict[str, Source]:
-    """Cria/atualiza o catálogo de fontes de forma atômica e idempotente.
+    """Create missing source rows without writing again on every app rerun."""
+    keys = tuple(SOURCE_DEFINITIONS)
+    existing = {
+        source.key: source
+        for source in session.scalars(select(Source).where(Source.key.in_(keys)))
+    }
+    missing = [
+        {"key": key, **SOURCE_DEFINITIONS[key]}
+        for key in keys
+        if key not in existing
+    ]
 
-    O Streamlit pode executar o script simultaneamente em mais de uma sessão.
-    Um SELECT seguido de INSERT permite que ambas tentem criar a mesma chave;
-    o UPSERT elimina essa janela tanto no SQLite quanto no PostgreSQL.
-    """
-    result = {}
-    dialect = session.get_bind().dialect.name
-    for key, values in SOURCE_DEFINITIONS.items():
-        payload = {"key": key, **values}
+    if missing:
+        dialect = session.get_bind().dialect.name
         if dialect == "sqlite":
             from sqlalchemy.dialects.sqlite import insert
 
-            statement = insert(Source).values(**payload)
-            statement = statement.on_conflict_do_update(
-                index_elements=[Source.key],
-                set_={field: getattr(statement.excluded, field) for field in values},
-            )
-            session.execute(statement)
+            statement = insert(Source).values(missing)
+            session.execute(statement.on_conflict_do_nothing(index_elements=[Source.key]))
         elif dialect == "postgresql":
             from sqlalchemy.dialects.postgresql import insert
 
-            statement = insert(Source).values(**payload)
-            statement = statement.on_conflict_do_update(
-                index_elements=[Source.key],
-                set_={field: getattr(statement.excluded, field) for field in values},
-            )
-            session.execute(statement)
+            statement = insert(Source).values(missing)
+            session.execute(statement.on_conflict_do_nothing(index_elements=[Source.key]))
         else:
-            source = session.scalar(select(Source).where(Source.key == key))
-            if source is None:
+            for payload in missing:
                 try:
                     with session.begin_nested():
                         session.add(Source(**payload))
                         session.flush()
                 except IntegrityError:
-                    # Outra transação criou a chave durante esta operação.
+                    # Another transaction inserted the same source first.
                     pass
         session.flush()
-        source = session.scalar(select(Source).where(Source.key == key))
-        if source is None:
-            raise RuntimeError(f"Não foi possível inicializar a fonte {key!r}.")
-        result[key] = source
-    return result
+        existing = {
+            source.key: source
+            for source in session.scalars(select(Source).where(Source.key.in_(keys)))
+        }
+
+    absent = set(keys) - set(existing)
+    if absent:
+        raise RuntimeError(
+            f"Não foi possível inicializar as fontes: {', '.join(sorted(absent))}."
+        )
+    return {key: existing[key] for key in keys}
 
 
 def touch_source(session, key: str) -> Source:
-    source = seed_sources(session)[key]
+    source = session.scalar(select(Source).where(Source.key == key))
+    if source is None:
+        source = seed_sources(session)[key]
     source.last_checked = datetime.utcnow()
     return source
-

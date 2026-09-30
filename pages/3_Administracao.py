@@ -14,6 +14,7 @@ st.caption("Operações leves. Cargas grandes devem preferir `python -m scripts.
 
 with session_scope() as session:
     seed_sources(session)
+    session.commit()
     repo = MunicipalityRepository(session)
     st.metric("Municípios cadastrados", repo.count())
     if st.button("Atualizar municípios pelo IBGE"):

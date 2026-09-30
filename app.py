@@ -98,6 +98,8 @@ def render_empty_connector(title: str, connector: str):
 
 with session_scope() as session:
     seed_sources(session)
+    # Release a possible first-run schema/catalog write before network calls and rendering.
+    session.commit()
     municipalities = MunicipalityRepository(session)
     try:
         if municipalities.count() < 5500:
