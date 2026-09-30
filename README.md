@@ -153,10 +153,10 @@ recriável. Para volume e latência de produção, execute cargas grandes em um 
   Prefeitos, vices, vereadores, governadores e deputados estaduais só devem aparecer em
   `office_exercises` após integração com a fonte oficial responsável, Diário Oficial ou outra evidência
   primária. Até lá a interface informa “sem exercício confirmado”.
-- **Sinesp:** os arquivos VDE anuais atuais publicam UF e nome, mas não código IBGE. Para obedecer à regra
-  de não fazer joins territoriais por nome, o conector registra indisponibilidade em vez de associar um
-  município de forma potencialmente ambígua. O leitor é streaming e passará a importar quando houver
-  código interoperável oficial; ausência nunca vira zero.
+- **Sinesp:** os arquivos VDE anuais atuais publicam UF e nome, mas não código IBGE. O conector aceita
+  apenas correspondência exata do nome oficial normalizado dentro da mesma UF quando ela resolve um único
+  código IBGE; casos ausentes ou ambíguos são recusados. O vínculo e os indicadores persistidos usam o
+  código IBGE, recebem qualidade `partial` e mantêm a ressalva metodológica; ausência nunca vira zero.
 - **TSE:** importações podem ser grandes. O arquivo é baixado uma vez, a leitura usa chunks e o município
   é relacionado por tabela oficial IBGE–TSE.
 - **Câmara:** os eventos oficiais permitem intervalos reais, incluindo afastamento e retorno. A filiação

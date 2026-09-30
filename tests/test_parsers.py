@@ -1,6 +1,6 @@
 from services.camara import reconstruct_exercise_intervals
 from services.ibge import _extract_series
-from services.sinesp import _find_column
+from services.sinesp import _find_column, _row_measure
 from services.tse import _resource
 
 
@@ -30,4 +30,13 @@ def test_tse_catalog_resource_and_sinesp_columns():
     columns = ["Código IBGE", "Ano de referência", "Quantidade de ocorrências"]
     assert _find_column(columns, "codigo ibge") == "Código IBGE"
     assert _find_column(columns, "quantidade") == "Quantidade de ocorrências"
+
+
+def test_sinesp_prefers_exact_total_header_and_separates_victims():
+    columns = ["total_vitima", "total"]
+    assert _find_column(columns, "total", "quantidade") == "total"
+
+    indexes = {column: index for index, column in enumerate(columns)}
+    assert _row_measure((None, 4), indexes, "total", "total_vitima") == (4.0, "ocorrencias")
+    assert _row_measure((3, None), indexes, "total", "total_vitima") == (3.0, "vitimas")
 
