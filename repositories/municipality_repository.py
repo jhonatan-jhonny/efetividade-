@@ -13,17 +13,41 @@ class MunicipalityRepository:
         return self.session.scalar(select(func.count()).select_from(Municipality)) or 0
 
     def upsert_many(self, records: list[dict]) -> int:
-        count = 0
-        for record in records:
-            obj = self.session.get(Municipality, record["codigo_ibge"])
-            if obj is None:
-                self.session.add(Municipality(**record))
+        if not records:
+            return 0
+        dialect = self.session.get_bind().dialect.name
+        if dialect in {"sqlite", "postgresql"}:
+            if dialect == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert
             else:
-                for key, value in record.items():
-                    setattr(obj, key, value)
-            count += 1
+                from sqlalchemy.dialects.postgresql import insert
+
+            # Lotes pequenos evitam limites de parâmetros do SQLite/PostgreSQL.
+            for offset in range(0, len(records), 500):
+                chunk = records[offset : offset + 500]
+                statement = insert(Municipality).values(chunk)
+                supplied_fields = set().union(*(record.keys() for record in chunk))
+                update_fields = {
+                    field: getattr(statement.excluded, field)
+                    for field in supplied_fields
+                    if field != "codigo_ibge"
+                }
+                self.session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[Municipality.codigo_ibge],
+                        set_=update_fields,
+                    )
+                )
+        else:
+            for record in records:
+                obj = self.session.get(Municipality, record["codigo_ibge"])
+                if obj is None:
+                    self.session.add(Municipality(**record))
+                else:
+                    for key, value in record.items():
+                        setattr(obj, key, value)
         self.session.flush()
-        return count
+        return len(records)
 
     def states(self) -> list[tuple[str, str]]:
         stmt = select(Municipality.uf, Municipality.state_name).distinct().order_by(Municipality.uf)
